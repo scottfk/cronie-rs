@@ -17,8 +17,10 @@
 
 ## Status
 
-Phases 1 to 4 are done: all four programs (`crond`, `crontab`, `cronnext`
-and `anacron`). Packaging is next.
+All five phases are done: the four programs (`crond`, `crontab`,
+`cronnext` and `anacron`) and a Gentoo ebuild
+([contrib/gentoo/](contrib/gentoo/README.md)), rehearsed with a real boot
+in the test VM.
 The reference is upstream's tag `cronie-1.7.2`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
 
@@ -49,6 +51,8 @@ same object files into each of them), and a binary per program in
 | `src/bin/anacron.rs` | `anacron/`: main, readtab, lock, runjob, log, gregor and matchrx |
 | `src/stdio.rs`, `getopt.rs`, `num.rs`, `bytes.rs` | glibc behavior the output depends on, copied from metalog-rs/openrc-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
+| `contrib/gentoo/` | the `sys-process/cronie` live ebuild and how to switch and roll back |
+| `tools/` | the reference build, and the VM boot check |
 
 ## Testing
 
@@ -106,8 +110,10 @@ To see what each case produced:
    Tested in the sandbox, real users and PAM included; the VM is for a real
    boot later.
 4. **`anacron` (done, branch `phase4-anacron`):** anacrontab, timestamps, delays and serialized runs.
-5. **Packaging:** a Gentoo ebuild (`sys-process/cronie` drop-in), rehearsed
-   in the VM.
+5. **Packaging (done, branch `phase5-ebuild`):** a Gentoo ebuild
+   (`sys-process/cronie` drop-in, [contrib/gentoo/](contrib/gentoo/README.md)),
+   rehearsed in the VM with
+   [tools/vm-cron-check.sh](tools/vm-cron-check.sh).
 
 The testing approach comes from
 [metalog-rs](https://codeberg.org/scottfk/metalog-rs): the C reference and
