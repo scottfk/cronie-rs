@@ -8,8 +8,8 @@
   `crond`, `crontab`, `cronnext` and `anacron`, with the same options,
   messages and exit statuses, the same crontab and anacrontab syntax, the
   same spool files, and jobs run at the same times with the same
-  environment. Upstream quirks are reproduced on purpose and will be listed
-  in QUIRKS.md. Improvements come later, as deliberate changes.
+  environment. Upstream quirks are reproduced on purpose and listed in
+  [QUIRKS.md](QUIRKS.md). Improvements come later, as deliberate changes.
 - **Linux only.**
 - **Small and boring:** `libc` as the only crate dependency, the same system
   libraries upstream links (PAM), no async, and `unsafe` confined to one
@@ -17,15 +17,59 @@
 
 ## Status
 
-Just starting. The reference is upstream's tag `cronie-1.7.2`, built as
-Gentoo builds it: USE="anacron inotify pam", `--enable-syscrontab`, the
-spool in `/var/spool/cron/crontabs`, and the daemon user and group `cron`.
+Phase 1 is done: the crontab parser, the database loader and `cronnext`.
+The reference is upstream's tag `cronie-1.7.2`, built as Gentoo builds it
+([tools/build-reference.sh](tools/build-reference.sh)):
+
+- USE="anacron inotify pam" and `--enable-syscrontab`;
+- the spool in `/var/spool/cron/crontabs`;
+- the daemon user and group `cron`.
+
+## Layout
+
+One library crate, with what upstream's programs share (upstream links the
+same object files into each of them), and a binary per program in
+`src/bin/`:
+
+| Path | What |
+|---|---|
+| `src/entry.rs` | `entry.c`: one crontab line (time fields, `@` specials, `~` random ranges, options) |
+| `src/env.rs` | `env.c`: `NAME=value` lines and job environments |
+| `src/user.rs` | `user.c` and `database.c`'s loader: crontab files, `/etc/crontab`, `/etc/cron.d`, the spool |
+| `src/reader.rs` | stdio input with glibc's `ungetc`/`ftell`/EOF rules, and misc.c's `get_char()` family |
+| `src/globals.rs` | globals.h, `log_it()` (syslog), debug flags |
+| `src/random.rs` | glibc's `random()`, for `~` ranges and `RANDOM_DELAY` |
+| `src/sys.rs` | every libc call: the only `unsafe` code |
+| `src/bin/cronnext.rs` | `cronnext.c` |
+| `src/stdio.rs`, `getopt.rs`, `num.rs`, `bytes.rs` | glibc behavior the output depends on, copied from metalog-rs/openrc-rs |
+| `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
+
+## Testing
+
+```sh
+make check
+```
+
+This builds the C reference into `../cronie` if it isn't there, then runs the
+unit tests and the differential suite. Each differential case runs a C program
+and its port on the same input and compares the exit status, stdout, stderr,
+the syslog messages and every file left behind.
+
+- Each run is "root" in an unprivileged user and mount namespace.
+- Test directories are bound over `/var/spool/cron`, `/etc/cron.d`,
+  `/etc/crontab` and `/dev/log`, so the installed-crontab code reads test
+  data at the real paths.
+- The clock is an LD_PRELOAD shim, so schedules are deterministic, DST
+  changes included.
+
+To see what each case produced:
+`CRONIE_DIFF_SHOW=1 cargo test -- --nocapture`.
 
 ## Roadmap
 
-1. **Crontab parsing and `cronnext`:** the entry parser (`entry.c`), the
-   environment lines, and the next-run calculation. These are pure, so they
-   are easy to diff against C.
+1. **Crontab parsing and `cronnext` (done, branch `phase1-parse`):** the
+   entry parser (`entry.c`), the environment lines, the database loader, and
+   the next-run calculation.
 2. **`crontab`:** list, edit, replace, remove and check (`-l -e -r -T`), the
    `cron.allow`/`cron.deny` rules, and the spool file format. It's setgid
    `crontab`, so this is where memory safety matters most.
