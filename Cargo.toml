@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "cronnext"
 path = "src/bin/cronnext.rs"
 
+[[bin]]
+name = "crontab"
+path = "src/bin/crontab.rs"
+
 [dependencies]
 libc = "0.2"
 
