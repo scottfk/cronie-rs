@@ -261,6 +261,8 @@ pub fn getpwnam(name: &[u8]) -> Option<Passwd> {
     // SAFETY: n is a valid C string; the static result is copied out at
     // once in this single-threaded program.
     let pw = unsafe { libc::getpwnam(n.as_ptr()) };
+    // glibc sets errno itself (0 for "no such user"); callers log it.
+    set_cerrno(last_os_errno());
     if pw.is_null() {
         return None;
     }
@@ -346,6 +348,12 @@ pub fn openlog(ident: Option<&CStr>, option: c_int, facility: c_int) {
     unsafe { libc::openlog(p, option, facility) };
 }
 
+/// `closelog()`.
+pub fn closelog() {
+    // SAFETY: always safe.
+    unsafe { libc::closelog() };
+}
+
 /// `syslog(priority, "%s", msg)`.
 pub fn syslog(priority: c_int, msg: &[u8]) {
     let m = to_cstring(msg);
@@ -406,6 +414,7 @@ pub fn setuid(u: libc::uid_t) -> Result<(), i32> {
 pub fn getpwuid(uid: libc::uid_t) -> Option<Passwd> {
     // SAFETY: the static result is converted at once (see getpwnam).
     let pw = unsafe { libc::getpwuid(uid) };
+    set_cerrno(last_os_errno());
     if pw.is_null() {
         return None;
     }
@@ -607,12 +616,14 @@ unsafe extern "C" {
     fn pam_open_session(pamh: *mut PamHandle, flags: c_int) -> c_int;
     fn pam_close_session(pamh: *mut PamHandle, flags: c_int) -> c_int;
     fn pam_strerror(pamh: *mut PamHandle, errnum: c_int) -> *const c_char;
+    fn pam_getenvlist(pamh: *mut PamHandle) -> *mut *mut c_char;
 }
 
 pub const PAM_SUCCESS: c_int = 0;
 pub const PAM_SILENT: c_int = 0x8000;
 pub const PAM_ESTABLISH_CRED: c_int = 0x0002;
 pub const PAM_DELETE_CRED: c_int = 0x0004;
+pub const PAM_REINITIALIZE_CRED: c_int = 0x0008;
 const PAM_TTY: c_int = 3;
 const PAM_ERROR_MSG: c_int = 3;
 const PAM_TEXT_INFO: c_int = 4;
@@ -696,6 +707,17 @@ impl Pam {
         unsafe { pam_close_session(self.h, flags) }
     }
 
+    /// `pam_strerror(NULL, err)` (libpam doesn't use the handle).
+    pub fn strerror_static(err: c_int) -> Vec<u8> {
+        // SAFETY: pam_strerror accepts a NULL handle; static result.
+        let p = unsafe { pam_strerror(std::ptr::null_mut(), err) };
+        if p.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: as above.
+        unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
+    }
+
     /// `pam_strerror(pamh, err)`.
     pub fn strerror(&self, err: c_int) -> Vec<u8> {
         // SAFETY: valid handle; the result is a static C string.
@@ -707,9 +729,338 @@ impl Pam {
         unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
     }
 
+    /// `pam_getenvlist(pamh)`: the PAM environment (`None` if NULL).  The
+    /// list and its strings are freed, as the caller would.
+    pub fn getenvlist(&self) -> Option<Vec<Vec<u8>>> {
+        // SAFETY: valid handle; the result is a malloc'ed NULL-terminated
+        // array of malloc'ed strings, owned by the caller.
+        unsafe {
+            let list = pam_getenvlist(self.h);
+            if list.is_null() {
+                return None;
+            }
+            let mut out = Vec::new();
+            let mut i = 0;
+            while !(*list.add(i)).is_null() {
+                let s = *list.add(i);
+                out.push(CStr::from_ptr(s).to_bytes().to_vec());
+                libc::free(s.cast());
+                i += 1;
+            }
+            libc::free(list.cast());
+            Some(out)
+        }
+    }
+
     /// `pam_end(pamh, status)`.
     pub fn end(self, status: c_int) {
         // SAFETY: valid handle, ended once (self is consumed).
         unsafe { pam_end(self.h, status) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// crond: time, environment, files
+
+/// `sleep(secs)`, through libc (the test clock shim intercepts it).
+pub fn sleep(secs: u32) -> u32 {
+    // SAFETY: no pointers involved.
+    unsafe { libc::sleep(secs) }
+}
+
+/// `gettimeofday()`'s microseconds (0 if it fails, as cron.c sets).
+pub fn gettimeofday_usec() -> i64 {
+    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    // SAFETY: tv is a valid out-pointer; tz may be NULL.
+    if unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) } != 0 {
+        return 0;
+    }
+    tv.tv_usec
+}
+
+/// `gmtime()`.
+pub fn gmtime(t: i64) -> Option<Tm> {
+    // SAFETY: the static result is copied out at once.
+    let p = unsafe { libc::gmtime(&t) };
+    // SAFETY: non-NULL results point to a valid struct tm.
+    if p.is_null() { None } else { Some(unsafe { *p }) }
+}
+
+/// `setenv(name, value, 1)`.
+pub fn setenv(name: &[u8], value: &[u8]) -> Result<(), i32> {
+    let n = to_cstring(name);
+    let v = to_cstring(value);
+    // SAFETY: valid C strings; single-threaded.
+    ok_or_errno(unsafe { libc::setenv(n.as_ptr(), v.as_ptr(), 1) })
+}
+
+/// `unsetenv(name)`.
+pub fn unsetenv(name: &[u8]) {
+    let n = to_cstring(name);
+    // SAFETY: valid C string; single-threaded.
+    unsafe { libc::unsetenv(n.as_ptr()) };
+}
+
+/// `nl_langinfo(CODESET)`.
+pub fn codeset() -> Option<Vec<u8>> {
+    // SAFETY: nl_langinfo returns a static string (or NULL).
+    let p = unsafe { libc::nl_langinfo(libc::CODESET) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: a valid C string.
+    Some(unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
+}
+
+/// `access(path, mode) == 0`.
+pub fn access(path: &[u8], mode: c_int) -> bool {
+    let p = to_cstring(path);
+    // SAFETY: valid C string.
+    let r = unsafe { libc::access(p.as_ptr(), mode) };
+    if r != 0 {
+        fail();
+    }
+    r == 0
+}
+
+/// `creat(path, mode)`.
+pub fn creat(path: &[u8], mode: libc::mode_t) -> Result<Fd, i32> {
+    let p = to_cstring(path);
+    // SAFETY: valid C string.
+    let fd = unsafe { libc::creat(p.as_ptr(), mode) };
+    if fd < 0 { Err(fail()) } else { Ok(fd) }
+}
+
+/// `flock(fd, LOCK_EX|LOCK_NB)`.
+pub fn flock_try(fd: Fd) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) })
+}
+
+/// `fcntl(fd, F_SETFD, 1)`.
+pub fn set_cloexec(fd: Fd) {
+    // SAFETY: no pointers involved.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, 1) };
+}
+
+pub fn chdir(path: Option<&[u8]>) -> Result<(), i32> {
+    match path {
+        // chdir(NULL) fails with EFAULT, as in C.
+        None => {
+            set_cerrno(libc::EFAULT);
+            Err(libc::EFAULT)
+        }
+        Some(p) => {
+            let c = to_cstring(p);
+            // SAFETY: valid C string.
+            ok_or_errno(unsafe { libc::chdir(c.as_ptr()) })
+        }
+    }
+}
+
+pub fn initgroups(name: &[u8], gid: libc::gid_t) -> Result<(), i32> {
+    let n = to_cstring(name);
+    // SAFETY: valid C string.
+    ok_or_errno(unsafe { libc::initgroups(n.as_ptr(), gid) })
+}
+
+pub fn pipe() -> Result<[Fd; 2], i32> {
+    let mut fds = [0 as c_int; 2];
+    // SAFETY: fds has room for two ints.
+    ok_or_errno(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
+    Ok(fds)
+}
+
+pub fn dup2(from: Fd, to: Fd) {
+    // SAFETY: no pointers involved.
+    unsafe { libc::dup2(from, to) };
+}
+
+pub fn setsid() {
+    // SAFETY: no pointers involved.
+    unsafe { libc::setsid() };
+}
+
+pub fn getdtablesize() -> c_int {
+    // SAFETY: no pointers involved.
+    unsafe { libc::getdtablesize() }
+}
+
+pub fn kill(pid: i32, sig: c_int) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::kill(pid, sig) })
+}
+
+/// `wait(&status)`: (pid, status); pid -1 on error (errno recorded).
+pub fn wait() -> (i32, c_int) {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    let r = unsafe { libc::wait(&mut st) };
+    if r < 0 {
+        fail();
+    }
+    (r, st)
+}
+
+/// `waitpid(-1, &status, WNOHANG)`.
+pub fn waitpid_nohang() -> (i32, c_int) {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+    if r < 0 {
+        fail();
+    }
+    (r, st)
+}
+
+/// `sigaction(sig, {handler, mask = {}, flags})`.
+pub fn sigaction(sig: c_int, handler: Option<Handler>, flags: c_int) {
+    // SAFETY: sigaction is plain old data; all-zero is a valid start.
+    let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+    sa.sa_sigaction = match handler {
+        Some(h) => h as *const () as libc::sighandler_t,
+        None => libc::SIG_DFL,
+    };
+    sa.sa_flags = flags;
+    // SAFETY: sa is valid; the old action isn't wanted.
+    unsafe {
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(sig, &sa, std::ptr::null_mut());
+    }
+}
+
+/// `sigaction(sig, {SIG_IGN})`.
+pub fn sigaction_ignore(sig: c_int) {
+    // SAFETY: as above, with SIG_IGN.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_IGN;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(sig, &sa, std::ptr::null_mut());
+    }
+}
+
+/// Block SIGINT, SIGQUIT and SIGHUP; returns the old mask for `sigrestore`.
+pub fn block_int_quit_hup() -> libc::sigset_t {
+    // SAFETY: sigset_t is plain old data; the calls fill it in.
+    unsafe {
+        let mut nset: libc::sigset_t = std::mem::zeroed();
+        let mut oset: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut nset);
+        libc::sigaddset(&mut nset, libc::SIGINT);
+        libc::sigaddset(&mut nset, libc::SIGQUIT);
+        libc::sigaddset(&mut nset, libc::SIGHUP);
+        libc::sigprocmask(libc::SIG_BLOCK, &nset, &mut oset);
+        oset
+    }
+}
+
+pub fn sigrestore(oset: &libc::sigset_t) {
+    // SAFETY: oset came from block_int_quit_hup.
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, oset, std::ptr::null_mut()) };
+}
+
+/// `execle(path, arg0, args..., NULL, envp)`; returns only on failure.
+pub fn execle(path: &[u8], args: &[&[u8]], envp: &[Vec<u8>]) -> i32 {
+    let p = to_cstring(path);
+    let a: Vec<CString> = args.iter().map(|x| to_cstring(x)).collect();
+    let e: Vec<CString> = envp.iter().map(|x| to_cstring(x)).collect();
+    let mut av: Vec<*const c_char> = a.iter().map(|c| c.as_ptr()).collect();
+    av.push(std::ptr::null());
+    let mut ev: Vec<*const c_char> = e.iter().map(|c| c.as_ptr()).collect();
+    ev.push(std::ptr::null());
+    // SAFETY: valid NULL-terminated arrays of C strings.
+    unsafe { libc::execve(p.as_ptr(), av.as_ptr(), ev.as_ptr()) };
+    fail()
+}
+
+/// `execvpe(file, argv, envp)` (searches PATH); returns only on failure.
+pub fn execvpe(file: &[u8], args: &[Vec<u8>], envp: &[Vec<u8>]) -> i32 {
+    let f = to_cstring(file);
+    let a: Vec<CString> = args.iter().map(|x| to_cstring(x)).collect();
+    let e: Vec<CString> = envp.iter().map(|x| to_cstring(x)).collect();
+    let mut av: Vec<*const c_char> = a.iter().map(|c| c.as_ptr()).collect();
+    av.push(std::ptr::null());
+    let mut ev: Vec<*const c_char> = e.iter().map(|c| c.as_ptr()).collect();
+    ev.push(std::ptr::null());
+    // SAFETY: valid NULL-terminated arrays of C strings.
+    unsafe { libc::execvpe(f.as_ptr(), av.as_ptr(), ev.as_ptr()) };
+    fail()
+}
+
+/// The fds open in this process (from /proc/self/fd), ascending.
+pub fn open_fds() -> Option<Vec<c_int>> {
+    let names = read_dir(b"/proc/self/fd").ok()?;
+    let mut fds: Vec<c_int> =
+        names.iter().filter(|n| n.as_slice() != b"." && n.as_slice() != b"..").map(|n| crate::num::atoi(n)).collect();
+    fds.sort_unstable();
+    Some(fds)
+}
+
+// ---------------------------------------------------------------------------
+// inotify
+
+pub fn inotify_init() -> Result<Fd, i32> {
+    // SAFETY: no pointers involved.
+    let fd = unsafe { libc::inotify_init() };
+    if fd < 0 { Err(fail()) } else { Ok(fd) }
+}
+
+pub fn inotify_add_watch(fd: Fd, path: &[u8], mask: u32) -> Result<c_int, i32> {
+    let p = to_cstring(path);
+    // SAFETY: valid C string.
+    let w = unsafe { libc::inotify_add_watch(fd, p.as_ptr(), mask) };
+    if w < 0 { Err(fail()) } else { Ok(w) }
+}
+
+pub fn inotify_rm_watch(fd: Fd, wd: c_int) {
+    // SAFETY: no pointers involved.
+    unsafe { libc::inotify_rm_watch(fd, wd) };
+}
+
+/// `select()` with a zero timeout: is fd readable?  Err on failure.
+pub fn readable_now(fd: Fd) -> Result<bool, i32> {
+    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: p is a valid pollfd.
+    let r = unsafe { libc::poll(&mut p, 1, 0) };
+    if r < 0 {
+        return Err(fail());
+    }
+    Ok(r > 0 && p.revents & libc::POLLIN != 0)
+}
+
+// ---------------------------------------------------------------------------
+// argv (crond's children upshift their program name for ps)
+
+static ARGV0: std::sync::atomic::AtomicPtr<c_char> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn capture_argv(_argc: c_int, argv: *mut *mut c_char, _envp: *mut *mut c_char) {
+    if !argv.is_null() {
+        // SAFETY: glibc passes a valid argv to .init_array functions.
+        ARGV0.store(unsafe { *argv }, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static CAPTURE_ARGV: extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char) = capture_argv;
+
+/// Upshift argv[0] after its last '/' in place, as cron.c does to
+/// `ProgramName` with CAPITALIZE_FOR_PS.  Returns the new name.
+pub fn capitalize_program_name() -> Vec<u8> {
+    let p = ARGV0.load(std::sync::atomic::Ordering::Relaxed);
+    if p.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: p is argv[0], a NUL-terminated string in this process's argv
+    // area; it is only modified in place, without changing its length.
+    unsafe {
+        let len = libc::strlen(p);
+        let bytes = std::slice::from_raw_parts_mut(p.cast::<u8>(), len);
+        let start = bytes.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+        for b in &mut bytes[start..] {
+            *b = b.to_ascii_uppercase();
+        }
+        bytes[start..].to_vec()
     }
 }

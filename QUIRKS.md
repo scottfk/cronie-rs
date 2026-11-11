@@ -25,6 +25,14 @@ means it's cosmetic or hard to hit.
 | low | When the backup directory can't be created, `backup_crontab()` "restores" an umask it never saved (an uninitialized variable). cronie-rs leaves the umask alone. Nothing is created afterwards, so the difference isn't observable. | `bin/crontab.rs` (`backup_crontab`) |
 | low | `crontab -r` deletes the crontab even when the backup fails (only a missing crontab stops it). | `bin/crontab.rs` (`delete_cmd`) |
 
+## crond
+
+| Severity | Quirk | Where |
+|---|---|---|
+| medium | `$VAR` and `${VAR}` in `MAILTO` and `MAILFROM` are expanded from **crond's own environment**, not the job's. So `MAILTO=$USER` means the user crond runs as, unset variables expand to nothing, and a `$` that doesn't start a valid name (`$1`, `${x`) stops expansion: the rest of the value is used as is. | `misc.rs` (`expand_envvar`) |
+| low | The `@reboot` lock file is created with mode `S_IRUSR & S_IWUSR` (`&`, not `\|`), which is 0. It only needs to exist, so nothing breaks. | `bin/crond.rs` (`run_reboot_jobs`) |
+| low | Carriage returns are dropped from mailed job output, except a `\r` that is the very first byte. | `bin/crond.rs` (`child_process`) |
+
 ## Intentional differences
 
 These are the only places where cronie-rs knowingly behaves differently. Each
@@ -36,6 +44,10 @@ replaces undefined behavior in C:
   cronie-rs stops at the end of the line, which matches C whenever that stale
   data starts with a NUL. Either way, the line is almost always rejected as
   not being an environment setting.
+- **Closing fds before a job runs:** C closes each fd while it lists
+  `/proc/self/fd`, including the directory's own fd partway through. cronie-rs
+  lists them first, then closes them. Either way, everything above stderr
+  ends up closed.
 - **`crontab` when `stat()` of the spool fails with an error other than
   ENOENT**: C goes on to test an uninitialized `struct stat`; cronie-rs
   reports that the spool is not a directory and exits.

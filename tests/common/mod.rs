@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_TIME: (i64, i64) = (1_762_869_600, 0);
 
 pub const PASSWD: &str = "\
-root:x:0:0:root:/root:/bin/sh
+root:x:0:0:root:@T@/home/root:/bin/sh
 alice:x:1001:1001:Alice:@T@/home/alice:/bin/sh
 bob:x:1002:1002:Bob:@T@/home/bob:/bin/sh
 cron:x:16:16:cron daemon:/var/spool/cron:/sbin/nologin
@@ -100,6 +100,10 @@ pub struct Case {
     /// Run a copy of the program that is setgid to this group (crontab is
     /// installed setgid crontab, mode 2751).
     pub setgid: Option<u32>,
+    /// Daemon mode (crond): run as PID 1 of a new PID namespace with
+    /// virtual time (the shim's sleep() advances the clock), until this
+    /// time, when the shim sends SIGTERM.
+    pub stop: Option<i64>,
 }
 
 impl Case {
@@ -114,7 +118,14 @@ impl Case {
             time: DEFAULT_TIME,
             user: As::Root,
             setgid: None,
+            stop: None,
         }
+    }
+
+    /// Run as a daemon in virtual time for `minutes` minutes (see `stop`).
+    pub fn run_for(mut self, minutes: i64) -> Case {
+        self.stop = Some(self.time.0 + minutes * 60);
+        self
     }
 
     pub fn env(mut self, k: &str, v: &str) -> Case {
@@ -187,6 +198,7 @@ pub fn reference_binary(program: &str) -> PathBuf {
 pub fn rust_binary(program: &str) -> PathBuf {
     PathBuf::from(match program {
         "cronnext" => env!("CARGO_BIN_EXE_cronnext"),
+        "crond" => env!("CARGO_BIN_EXE_crond"),
         "crontab" => env!("CARGO_BIN_EXE_crontab"),
         p => panic!("no Rust binary for {p} yet"),
     })
@@ -238,6 +250,9 @@ fn subordinate(file: &str, name: &str, id: u32) -> u32 {
 
 /// What the child does between fork and exec, prepared beforehand.
 struct Spawn {
+    /// Also a new PID namespace: the program runs as its PID 1 (with a
+    /// fresh /proc), under a waiter that exits with its status.
+    pid_ns: bool,
     binds: Vec<(CString, CString)>,
     /// (path, owner, group, mode) fixups made as root in the sandbox.
     chowns: Vec<(CString, u32, u32, u32)>,
@@ -276,6 +291,8 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
     let (up_r, up_w) = pipe();
     let (go_r, go_w) = pipe();
     let root = cstr("/");
+    let proc_ = cstr("proc");
+    let proc_dir = cstr("/proc");
 
     // SAFETY: between fork and exec the child only makes async-signal-safe
     // system calls on memory prepared above, then execs or _exits.
@@ -286,7 +303,8 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
         unsafe {
             libc::close(go_w);
             libc::close(up_r);
-            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+            let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | if s.pid_ns { libc::CLONE_NEWPID } else { 0 };
+            if libc::unshare(flags) != 0 {
                 libc::_exit(120);
             }
             libc::write(up_w, b"u".as_ptr().cast(), 1);
@@ -301,6 +319,30 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
             for (src, dst) in &s.binds {
                 if libc::mount(src.as_ptr(), dst.as_ptr(), none, libc::MS_BIND | libc::MS_REC, std::ptr::null()) != 0 {
                     libc::_exit(123);
+                }
+            }
+            if s.pid_ns {
+                // The next child is PID 1; this process waits for it.
+                let inner = libc::fork();
+                if inner < 0 {
+                    libc::_exit(119);
+                }
+                if inner > 0 {
+                    libc::close(up_w);
+                    let mut st: c_int = 0;
+                    while libc::waitpid(inner, &mut st, 0) < 0 {}
+                    if libc::WIFEXITED(st) {
+                        libc::_exit(libc::WEXITSTATUS(st));
+                    }
+                    libc::_exit(128 + libc::WTERMSIG(st));
+                }
+                // Die with the waiter (the harness may kill it on a timeout).
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+                let none = std::ptr::null::<c_char>();
+                let fl = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+                if libc::mount(proc_.as_ptr(), proc_dir.as_ptr(), proc_.as_ptr(), fl, std::ptr::null()) != 0 {
+                    let _ = none;
+                    libc::_exit(118);
                 }
             }
             for (path, owner, group, mode) in &s.chowns {
@@ -401,7 +443,11 @@ fn binds(t: &Path) -> Vec<(CString, CString)> {
         (path_c(&t.join("etc")), cstr("/etc")),
         (path_c(&t.join("spool")), cstr("/var/spool/cron")),
         (path_c(&t.join("tmp")), cstr("/tmp")),
+        (path_c(&t.join("run")), cstr("/run")),
     ];
+    if Path::new("/usr/sbin/sendmail").exists() {
+        b.push((path_c(&t.join("sendmail")), cstr("/usr/sbin/sendmail")));
+    }
     if Path::new("/dev/log").exists() {
         b.push((path_c(&t.join("devlog")), cstr("/dev/log")));
     }
@@ -416,6 +462,7 @@ fn root_shell(t: &Path, script: &str) -> Vec<u8> {
     let outf = std::fs::File::create(&out).unwrap();
     let null = std::fs::File::open("/dev/null").unwrap();
     let pid = spawn_in_sandbox(Spawn {
+        pid_ns: false,
         binds: binds(t),
         chowns: Vec::new(),
         user: As::Root,
@@ -437,7 +484,7 @@ fn clean(t: &Path) {
     if !t.exists() || std::fs::remove_dir_all(t).is_ok() {
         return;
     }
-    for d in ["etc", ".realetc", "spool", "tmp"] {
+    for d in ["etc", ".realetc", "spool", "tmp", "run"] {
         std::fs::create_dir_all(t.join(d)).ok();
     }
     root_shell(t, &format!("chown -R 0:0 '{0}' 2>/dev/null; chmod -R u+rwX '{0}' 2>/dev/null; exit 0", t.display()));
@@ -499,6 +546,23 @@ pub fn normalize(s: &str, t: &Path, pid: u32) -> String {
     out
 }
 
+/// In daemon runs the daemon is PID 1; its children's pids depend on
+/// scheduling.  `CROND[17]` -> `CROND[N]` (the capitalized name is the
+/// job processes').
+fn normalize_job_pids(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(k) = rest.find("CROND[") {
+        out.push_str(&rest[..k + 6]);
+        rest = &rest[k + 6..];
+        let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+        out.push('N');
+        rest = &rest[n..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The tree under `t`, as root in the sandbox: type, mode, owner, contents.
 fn snapshot(t: &Path, pid: u32) -> BTreeMap<String, String> {
     let script = format!(
@@ -552,11 +616,15 @@ fn build_etc(t: &Path) {
     std::fs::write(pam.join("crond"), PAM_PERMIT).unwrap();
 }
 
+/// The fake /usr/sbin/sendmail: each message (arguments, then the mail)
+/// becomes a file in T/mail.
+const SENDMAIL: &str = "#!/bin/sh\n{ printf 'sendmail'; printf ' %s' \"$@\"; printf '\\n'; cat; } > @T@/mail/mail.$$\n";
+
 pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     use std::os::fd::AsRawFd;
     let t = manifest_dir().join("target/difftest").join(&case.name).join(label);
     clean(&t);
-    for d in ["spool/crontabs", ".realetc", "tmp", "home/alice", "home/bob", "bin"] {
+    for d in ["spool/crontabs", ".realetc", "tmp", "home/root", "home/alice", "home/bob", "bin", "run", "mail", "out"] {
         std::fs::create_dir_all(t.join(d)).unwrap();
     }
     build_etc(&t);
@@ -566,7 +634,14 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         (path_c(&t.join("tmp")), 0, 0, 0o1777),
         // Gentoo: docrondir -m 1730 -o root -g crontab
         (path_c(&t.join("spool/crontabs")), 0, 460, 0o1730),
+        (path_c(&t.join("mail")), 0, 0, 0o1777),
+        (path_c(&t.join("out")), 0, 0, 0o1777),
     ];
+    std::fs::write(t.join("sendmail"), subst(SENDMAIL, &t)).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(t.join("sendmail"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     for (path, data, mode, uid) in &case.files {
         let p = t.join(subst(path, &t));
         if let Some(parent) = p.parent() {
@@ -597,7 +672,26 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     };
 
     let syslog = UnixDatagram::bind(t.join("devlog")).unwrap();
-    syslog.set_nonblocking(true).unwrap();
+    // A datagram socket queues only a few messages (net.unix.max_dgram_qlen)
+    // before senders block, so read them as they come.
+    syslog.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let stop_reader = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let sock = syslog.try_clone().unwrap();
+        let stop = stop_reader.clone();
+        std::thread::spawn(move || {
+            let mut msgs: Vec<Vec<u8>> = Vec::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                match sock.recv(&mut buf) {
+                    Ok(n) => msgs.push(buf[..n].to_vec()),
+                    Err(_) if stop.load(std::sync::atomic::Ordering::SeqCst) => break,
+                    Err(_) => {}
+                }
+            }
+            msgs
+        })
+    };
     {
         // Like the real /dev/log: every user may log.
         use std::os::unix::fs::PermissionsExt;
@@ -611,6 +705,10 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         cstr(format!("LD_PRELOAD={}", shim().display())),
         cstr(format!("TEST_FAKETIME={}", t.join(".faketime").display())),
     ];
+    if let Some(stop) = case.stop {
+        envp.push(cstr("TEST_VIRTUAL_SLEEP=1"));
+        envp.push(cstr(format!("TEST_STOP={stop}")));
+    }
     for (k, v) in &case.env {
         envp.push(cstr(format!("{k}={}", subst(v, &t))));
     }
@@ -618,6 +716,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     argv.extend(case.args.iter().map(|a| cstr(subst(a, &t))));
 
     let pid = spawn_in_sandbox(Spawn {
+        pid_ns: case.stop.is_some(),
         binds: binds(&t),
         chowns,
         user: case.user,
@@ -634,12 +733,12 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         assert!(!(120..=127).contains(&code), "{}: {label}: sandbox setup failed ({status})", case.name);
     }
 
+    stop_reader.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut log = String::new();
-    let mut buf = [0u8; 65536];
-    while let Ok(n) = syslog.recv(&mut buf) {
+    for raw in reader.join().unwrap() {
         // "<pri>Mmm dd hh:mm:ss ident[pid]: msg": glibc's syslog() reads the
         // clock internally (not through the shim), so drop the timestamp.
-        let msg = String::from_utf8_lossy(&buf[..n]).to_string();
+        let msg = String::from_utf8_lossy(&raw).to_string();
         let msg = match (msg.find('>'), msg.len() > 20) {
             (Some(gt), true) if msg.is_char_boundary(gt + 16) => format!("{}{}", &msg[..=gt], &msg[gt + 16..]),
             _ => msg,
@@ -648,7 +747,19 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         log.push('\n');
     }
     let rd = |n: &str| normalize(&String::from_utf8_lossy(&std::fs::read(t.join(n)).unwrap()), &t, pid);
-    Outcome { status, stdout: rd("stdout"), stderr: rd("stderr"), syslog: log, files: snapshot(&t, pid) }
+    let mut files = snapshot(&t, pid);
+    if case.stop.is_some() {
+        // Jobs of the same minute run concurrently: compare their mails
+        // and log lines as sets, and job pids as placeholders.
+        let mails: Vec<String> = files.keys().filter(|k| k.starts_with("./mail/")).cloned().collect();
+        let mut bodies: Vec<String> = mails.iter().map(|k| files.remove(k).unwrap()).collect();
+        bodies.sort();
+        files.insert("<mail>".into(), bodies.join("\n=====\n"));
+        let mut lines: Vec<String> = log.lines().map(normalize_job_pids).collect();
+        lines.sort();
+        log = lines.join("\n");
+    }
+    Outcome { status, stdout: rd("stdout"), stderr: rd("stderr"), syslog: log, files }
 }
 
 /// Run a case with the C program and its port; assert identical outcomes.
