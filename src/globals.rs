@@ -109,6 +109,26 @@ pub fn set_debug_flags(flags: &[u8]) -> bool {
     true
 }
 
+/// `log_close()`: close syslog (the next `log_it` reopens it).
+pub fn log_close() {
+    sys::closelog();
+    SYSLOG_OPEN.with(|c| c.set(false));
+}
+
+/// The current `ProgramName` (the syslog ident).
+pub fn program_name() -> Option<Vec<u8>> {
+    PROGRAM_NAME.with(|p| p.borrow().clone())
+}
+
+/// Change `ProgramName` in place, as C's upshifting does: an open syslog
+/// connection keeps C's pointer, so it shows the new name too.
+pub fn rename_program(name: &[u8]) {
+    set_program_name(name);
+    if SYSLOG_OPEN.with(Cell::get) {
+        sys::openlog(Some(sys::leak_cstring(name)), libc::LOG_PID, libc::LOG_CRON);
+    }
+}
+
 /// `log_it(username, pid, event, detail, err)`: syslog (cronie is built
 /// with SYSLOG, not LOG_FILE), plus stderr when debugging.
 pub fn log_it(username: &[u8], pid: i32, event: &[u8], detail: &[u8], err: i32) {

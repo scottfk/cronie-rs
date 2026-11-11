@@ -17,6 +17,10 @@ name = "cronnext"
 path = "src/bin/cronnext.rs"
 
 [[bin]]
+name = "crond"
+path = "src/bin/crond.rs"
+
+[[bin]]
 name = "crontab"
 path = "src/bin/crontab.rs"
 

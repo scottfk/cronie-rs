@@ -17,8 +17,8 @@
 
 ## Status
 
-Phases 1 and 2 are done: the crontab parser, the database loader,
-`cronnext` and `crontab`.
+Phases 1 to 3 are done: the crontab parser, the database loader,
+`cronnext`, `crontab` and `crond`. anacron is next.
 The reference is upstream's tag `cronie-1.7.2`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
 
@@ -41,9 +41,11 @@ same object files into each of them), and a binary per program in
 | `src/globals.rs` | globals.h, `log_it()` (syslog), debug flags |
 | `src/random.rs` | glibc's `random()`, for `~` ranges and `RANDOM_DELAY` |
 | `src/sys.rs` | every libc call: the only `unsafe` code |
-| `src/security.rs` | `security.c`'s `cron.allow`/`cron.deny` check and PAM account check |
+| `src/security.rs` | `security.c`: `cron.allow`/`cron.deny`, PAM, changing to the job's user and groups |
+| `src/misc.rs` | `misc.c`/`cronie_common.c` helpers: `check_spool_dir`, `mkprints`, `expand_envvar` |
 | `src/bin/cronnext.rs` | `cronnext.c` |
 | `src/bin/crontab.rs` | `crontab.c` |
+| `src/bin/crond.rs` | `cron.c`, `job.c`, `do_command.c`, `popen.c` and the inotify half of `database.c` |
 | `src/stdio.rs`, `getopt.rs`, `num.rs`, `bytes.rs` | glibc behavior the output depends on, copied from metalog-rs/openrc-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
 
@@ -71,6 +73,19 @@ the syslog messages and every file left behind.
   changes included.
 - The snapshot runs as root inside the sandbox, so files owned by test users
   (and their owners) are compared too.
+- crond runs in **virtual time**:
+  - The shim's `sleep()` waits until crond's job children have finished, then
+    moves the fake clock on. Hours of cron run in a fraction of a second, and
+    a minute's jobs finish before the next minute.
+  - At the case's stop time crond gets SIGTERM.
+  - crond is PID 1 of its own PID namespace, so its `random()` seed (pid plus
+    microseconds) is the same for C and Rust.
+  - `/run` and `/usr/sbin/sendmail` are test copies; the fake sendmail keeps
+    every mail.
+  - Jobs of the same minute run concurrently, so their mails and log lines
+    are compared as sets.
+  - Clock jumps and SIGHUP come from jobs, which rewrite the fake clock or run
+    `kill -HUP 1`.
 
 To see what each case produced:
 `CRONIE_DIFF_SHOW=1 cargo test -- --nocapture`.
@@ -83,9 +98,10 @@ To see what each case produced:
 2. **`crontab` (done, branch `phase2-crontab`):** list, edit, replace, remove and check (`-l -e -r -T`), the
    `cron.allow`/`cron.deny` rules, and the spool file format. It's setgid
    `crontab`, so this is where memory safety matters most.
-3. **`crond`:** the database (`database.c`, inotify), the minute loop and
+3. **`crond` (done, branch `phase3-crond`):** the database (`database.c`, inotify), the minute loop and
    clock jumps, running jobs (`do_command.c`, PAM, mail), and `@reboot`.
-   Job execution needs real root, so it's tested in the shared VM.
+   Tested in the sandbox, real users and PAM included; the VM is for a real
+   boot later.
 4. **`anacron`:** anacrontab, timestamps, delays and serialized runs.
 5. **Packaging:** a Gentoo ebuild (`sys-process/cronie` drop-in), rehearsed
    in the VM.

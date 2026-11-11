@@ -36,6 +36,8 @@ pub struct User {
 pub struct CronDb {
     pub users: Vec<User>,
     pub mtime: i64,
+    /// The inotify fd (crond), or -1.
+    pub ifd: i32,
 }
 
 /// `load_user(crontab_fd, pw, uname, fname, tabname)`.  Takes ownership of
@@ -175,13 +177,29 @@ fn add_orphan(uname: &[u8], fname: Option<&[u8]>, tabname: &[u8]) {
     });
 }
 
+/// `check_orphans()`: load crontabs whose users have appeared since.
+pub fn check_orphans(db: &mut CronDb) {
+    let orphans = ORPHANS.with(|o| o.borrow().clone());
+    for o in orphans {
+        if sys::getpwnam(&o.uname).is_some() {
+            ORPHANS.with(|os| {
+                let mut os = os.borrow_mut();
+                if let Some(i) = os.iter().position(|x| *x == o) {
+                    os.remove(i);
+                }
+            });
+            process_crontab(&o.uname, o.fname.as_deref(), &o.tabname, db, None);
+        }
+    }
+}
+
 /// `find_user(db, name, tabname)`.
 pub fn find_user(db: &CronDb, name: &[u8], tabname: Option<&[u8]>) -> Option<usize> {
     db.users.iter().position(|u| u.name == name && tabname.is_none_or(|t| t == u.tabname.as_slice()))
 }
 
 /// `process_crontab(uname, fname, tabname, new_db, old_db)`.
-fn process_crontab(
+pub fn process_crontab(
     uname: &[u8],
     fname: Option<&[u8]>,
     tabname: &[u8],
@@ -230,7 +248,7 @@ fn process_crontab(
 }
 
 /// `not_a_crontab()`: names in the crontab directories to skip.
-fn not_a_crontab(name: &[u8]) -> bool {
+pub fn not_a_crontab(name: &[u8]) -> bool {
     if name.first() == Some(&b'.') || name.first() == Some(&b'#') {
         return true;
     }
@@ -318,7 +336,7 @@ pub fn load_database(old_db: &mut CronDb) -> bool {
         return false;
     }
 
-    let mut new_db = CronDb { users: Vec::new(), mtime: now - 1 };
+    let mut new_db = CronDb { users: Vec::new(), mtime: now - 1, ifd: old_db.ifd };
     if syscron_mtime != 0 {
         process_crontab(b"root", None, SYSCRONTAB, &mut new_db, Some(old_db));
     }

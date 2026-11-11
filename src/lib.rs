@@ -20,6 +20,7 @@ pub mod env;
 #[allow(dead_code)]
 pub mod getopt;
 pub mod globals;
+pub mod misc;
 #[allow(dead_code)]
 pub mod num;
 pub mod random;

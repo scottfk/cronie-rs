@@ -1021,37 +1021,6 @@ impl Crontab {
     }
 }
 
-/// `check_spool_dir()` (built without CRON_GROUP: no chown/chmod).
-fn check_spool_dir() {
-    let st = match sys::stat(SPOOL_DIR) {
-        Err(e) if e == libc::ENOENT => {
-            stdio::perror(SPOOL_DIR);
-            if sys::mkdir(SPOOL_DIR, 0o700).is_ok() {
-                err(&bcat!(SPOOL_DIR, ": created\n"));
-                match sys::stat(SPOOL_DIR) {
-                    Ok(st) => Some(st),
-                    Err(_) => {
-                        stdio::perror(b"stat retry");
-                        exit(ERROR_EXIT);
-                    }
-                }
-            } else {
-                err(&bcat!(SPOOL_DIR, ": "));
-                stdio::perror(b"mkdir");
-                exit(ERROR_EXIT);
-            }
-        }
-        // C then tests an uninitialized struct stat; treat it as "not a
-        // directory".
-        Err(_) => None,
-        Ok(st) => Some(st),
-    };
-    if !st.is_some_and(|s| sys::is_dir(s.mode)) {
-        err(&bcat!("'", SPOOL_DIR, "' is not a directory, bailing out.\n"));
-        exit(ERROR_EXIT);
-    }
-}
-
 fn main() {
     let args: Vec<Vec<u8>> = std::env::args_os().map(std::os::unix::ffi::OsStringExt::into_vec).collect();
     let argv0 = args.first().cloned().unwrap_or_default();
@@ -1077,7 +1046,7 @@ fn main() {
     };
     sys::setlocale_all();
     c.parse_args(args);
-    check_spool_dir();
+    cronie::misc::check_spool_dir();
     if !security::allowed(&c.real_user, CRON_ALLOW, CRON_DENY) {
         err(&bcat!("You (", c.user, ") are not allowed to use this program (", c.program, ")\n"));
         err(b"See crontab(1) for more information\n");
