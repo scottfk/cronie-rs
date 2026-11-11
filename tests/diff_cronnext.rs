@@ -30,7 +30,7 @@ fn options() {
     check(Case::new("clustered_bad", "cronnext", &["-lZ"]));
     check(Case::new("f_without_q", "cronnext", &["-f", "x"]));
     check(Case::new("missing_file", "cronnext", &["@T@/nope"]));
-    check(Case::new("directory_arg", "cronnext", &["@T@/cron.d"]));
+    check(Case::new("directory_arg", "cronnext", &["@T@/etc/cron.d"]));
 }
 
 #[test]
@@ -112,8 +112,8 @@ fn installed_database() {
         Case::new("x", "cronnext", &["-c"])
             .spool("root", user_tab)
             .spool("nobody", "0 8 * * * nobody's job\n")
-            .file("crontab", sys_tab.as_bytes(), 0o644)
-            .file("cron.d/extra", b"0 9 * * * root cron.d job\n", 0o644)
+            .file("etc/crontab", sys_tab.as_bytes(), 0o644)
+            .file("etc/cron.d/extra", b"0 9 * * * root cron.d job\n", 0o644)
     };
     check(Case { name: "db_all".into(), ..base() });
     check(Case { name: "db_no_system".into(), args: vec!["-c".into(), "-s".into()], ..base() });
@@ -133,9 +133,9 @@ fn installed_database() {
             .spool("#temp", "0 3 * * * temp\n")
             .spool("nobody~", "0 3 * * * backup\n")
             .spool("x.rpmsave", "0 3 * * * rpm\n")
-            .file("cron.d/notregular", b"", 0o644)
-            .file("cron.d/exec", b"0 4 * * * root executable\n", 0o755)
-            .file("cron.d/.dot", b"0 4 * * * root dot\n", 0o644),
+            .file("etc/cron.d/notregular", b"", 0o644)
+            .file("etc/cron.d/exec", b"0 4 * * * root executable\n", 0o755)
+            .file("etc/cron.d/.dot", b"0 4 * * * root dot\n", 0o644),
     );
     check(Case::new("db_garbage", "cronnext", &["-c"]).spool("root", &format!("{}\n0 0 * * * x\n", "#".repeat(40000))));
     check(Case::new("db_empty", "cronnext", &[]));

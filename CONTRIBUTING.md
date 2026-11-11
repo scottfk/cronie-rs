@@ -43,7 +43,9 @@ The layout follows upstream's sources (`src/` for crond, crontab and cronnext;
 
 You need Rust 1.88 or newer (edition 2024), a C compiler, and PAM headers and
 libraries. For the differential tests you also need the tools to build upstream cronie
-(`git`, `autoconf`, `automake`, `pkg-config`) and unprivileged user namespaces.
+(`git`, `autoconf`, `automake`, `pkg-config`), unprivileged user namespaces, and a
+subordinate id range of at least 65536 for your user in `/etc/subuid` and
+`/etc/subgid` (with `newuidmap`/`newgidmap` from shadow).
 
 ```sh
 make                # release build
@@ -61,14 +63,15 @@ clean.**
 Most testing is done by running the C reference and cronie-rs side by side on the same
 input, the way [metalog-rs](https://codeberg.org/scottfk/metalog-rs) does it:
 
-- Each run is "root" in an unprivileged user namespace, with its own directory under
-  `target/difftest/<case>/{c,rust}/`.
+- Each run is in a private user and mount namespace with real users mapped from your
+  subordinate ids, and its own directory under `target/difftest/<case>/{c,rust}/`.
+  `/etc` there is the harness's (test users, PAM config, cron.allow/deny).
 - The clock comes from an LD_PRELOAD shim, so "when does this job run" is deterministic,
   across DST changes and clock jumps.
 - The exit status, stdout, stderr, every file written and the jobs that ran are compared.
 
-Switching to each user to run their jobs (setuid, PAM) needs the real root, so those cases
-run in a test VM and skip elsewhere.
+Cases can run as root or as test users, and `crontab` cases through a really setgid copy,
+so permission checks are tested without real root.
 
 When you fix a difference or change behavior, add cases that cover it, including error
 paths and odd input. Unit tests are fine for internal helpers, but a differential test is

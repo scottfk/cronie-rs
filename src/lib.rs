@@ -24,6 +24,7 @@ pub mod globals;
 pub mod num;
 pub mod random;
 pub mod reader;
+pub mod security;
 pub mod stdio;
 pub mod sys;
 pub mod user;

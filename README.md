@@ -17,7 +17,8 @@
 
 ## Status
 
-Phase 1 is done: the crontab parser, the database loader and `cronnext`.
+Phases 1 and 2 are done: the crontab parser, the database loader,
+`cronnext` and `crontab`.
 The reference is upstream's tag `cronie-1.7.2`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
 
@@ -40,7 +41,9 @@ same object files into each of them), and a binary per program in
 | `src/globals.rs` | globals.h, `log_it()` (syslog), debug flags |
 | `src/random.rs` | glibc's `random()`, for `~` ranges and `RANDOM_DELAY` |
 | `src/sys.rs` | every libc call: the only `unsafe` code |
+| `src/security.rs` | `security.c`'s `cron.allow`/`cron.deny` check and PAM account check |
 | `src/bin/cronnext.rs` | `cronnext.c` |
+| `src/bin/crontab.rs` | `crontab.c` |
 | `src/stdio.rs`, `getopt.rs`, `num.rs`, `bytes.rs` | glibc behavior the output depends on, copied from metalog-rs/openrc-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
 
@@ -55,12 +58,19 @@ unit tests and the differential suite. Each differential case runs a C program
 and its port on the same input and compares the exit status, stdout, stderr,
 the syslog messages and every file left behind.
 
-- Each run is "root" in an unprivileged user and mount namespace.
-- Test directories are bound over `/var/spool/cron`, `/etc/cron.d`,
-  `/etc/crontab` and `/dev/log`, so the installed-crontab code reads test
-  data at the real paths.
+- Each run is in a private user and mount namespace, with ids mapped by
+  `newuidmap`/`newgidmap` from your subordinate ranges (`/etc/subuid`,
+  `/etc/subgid`; 65536 ids are needed). So the sandbox has a real root and
+  real other users. Cases run as root, or as test users through a copy of
+  `crontab` that is really setgid `crontab`, as Gentoo installs it.
+- `/etc` in the sandbox is a symlink farm over the real one, with its own
+  `passwd`/`group` (root, alice, bob, ...), `pam.d/crond`, `cron.allow`,
+  `cron.deny`, `crontab` and `cron.d`. Test directories are bound over
+  `/var/spool/cron`, `/tmp` and `/dev/log`.
 - The clock is an LD_PRELOAD shim, so schedules are deterministic, DST
   changes included.
+- The snapshot runs as root inside the sandbox, so files owned by test users
+  (and their owners) are compared too.
 
 To see what each case produced:
 `CRONIE_DIFF_SHOW=1 cargo test -- --nocapture`.
@@ -70,7 +80,7 @@ To see what each case produced:
 1. **Crontab parsing and `cronnext` (done, branch `phase1-parse`):** the
    entry parser (`entry.c`), the environment lines, the database loader, and
    the next-run calculation.
-2. **`crontab`:** list, edit, replace, remove and check (`-l -e -r -T`), the
+2. **`crontab` (done, branch `phase2-crontab`):** list, edit, replace, remove and check (`-l -e -r -T`), the
    `cron.allow`/`cron.deny` rules, and the spool file format. It's setgid
    `crontab`, so this is where memory safety matters most.
 3. **`crond`:** the database (`database.c`, inotify), the minute loop and

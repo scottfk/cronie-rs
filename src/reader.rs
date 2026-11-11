@@ -22,11 +22,72 @@ pub struct Reader {
     pos: usize,
     back: Vec<u8>,
     eof: bool,
+    /// Read lazily from this fd, as stdio does (`None`: `data` is all).
+    src: Option<crate::sys::Fd>,
 }
 
 impl Reader {
     pub fn new(data: Vec<u8>) -> Reader {
-        Reader { data, pos: 0, back: Vec::new(), eof: false }
+        Reader { data, pos: 0, back: Vec::new(), eof: false, src: None }
+    }
+
+    /// A stream over an open fd (`fdopen(fd, "r")`), read as needed.
+    pub fn from_fd(fd: crate::sys::Fd) -> Reader {
+        Reader { data: Vec::new(), pos: 0, back: Vec::new(), eof: false, src: Some(fd) }
+    }
+
+    pub fn fd(&self) -> Option<crate::sys::Fd> {
+        self.src
+    }
+
+    /// Refill like `_IO_file_underflow`: one read(2) of up to 4 kB.
+    fn fill(&mut self) -> bool {
+        let Some(fd) = self.src else { return false };
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = crate::sys::read(fd, &mut buf);
+            if n < 0 && crate::sys::cerrno() == libc::EINTR {
+                continue;
+            }
+            if n <= 0 {
+                return false;
+            }
+            self.data.extend_from_slice(&buf[..n as usize]);
+            return true;
+        }
+    }
+
+    /// `rewind()`: back to the start of the file (on a pipe, which can't
+    /// seek, only the EOF indicator is reset).
+    pub fn rewind(&mut self) {
+        self.back.clear();
+        self.eof = false;
+        match self.src {
+            Some(fd) => {
+                if crate::sys::lseek_set(fd, 0).is_ok() {
+                    self.data.clear();
+                    self.pos = 0;
+                }
+            }
+            None => self.pos = 0,
+        }
+    }
+
+    /// `fgets(buf, size, f)`: up to size-1 bytes or through a newline;
+    /// `None` at EOF with nothing read.
+    pub fn fgets(&mut self, size: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        while out.len() + 1 < size {
+            let c = self.getc();
+            if c == EOF {
+                break;
+            }
+            out.push(c as u8);
+            if c == i32::from(b'\n') {
+                break;
+            }
+        }
+        if out.is_empty() && size > 1 { None } else { Some(out) }
     }
 
     /// `getc()`.
@@ -36,6 +97,9 @@ impl Reader {
         }
         if self.eof {
             return EOF;
+        }
+        if self.pos >= self.data.len() {
+            self.fill();
         }
         match self.data.get(self.pos) {
             Some(&c) => {

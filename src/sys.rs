@@ -360,3 +360,356 @@ pub fn leak_cstring(s: &[u8]) -> &'static CStr {
 
 /// Keep `CString` in scope for callers that build their own.
 pub type OwnedCString = CString;
+
+// ---------------------------------------------------------------------------
+// Credentials
+
+pub fn getuid() -> libc::uid_t {
+    // SAFETY: always safe.
+    unsafe { libc::getuid() }
+}
+pub fn geteuid() -> libc::uid_t {
+    // SAFETY: always safe.
+    unsafe { libc::geteuid() }
+}
+pub fn getgid() -> libc::gid_t {
+    // SAFETY: always safe.
+    unsafe { libc::getgid() }
+}
+pub fn getegid() -> libc::gid_t {
+    // SAFETY: always safe.
+    unsafe { libc::getegid() }
+}
+
+fn ok_or_errno(r: c_int) -> Result<(), i32> {
+    if r < 0 { Err(fail()) } else { Ok(()) }
+}
+
+pub fn setregid(r: libc::gid_t, e: libc::gid_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::setregid(r, e) })
+}
+pub fn setreuid(r: libc::uid_t, e: libc::uid_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::setreuid(r, e) })
+}
+pub fn setgid(g: libc::gid_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::setgid(g) })
+}
+pub fn setuid(u: libc::uid_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::setuid(u) })
+}
+
+/// `getpwuid(uid)`.
+pub fn getpwuid(uid: libc::uid_t) -> Option<Passwd> {
+    // SAFETY: the static result is converted at once (see getpwnam).
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return None;
+    }
+    // SAFETY: pw is a valid struct passwd.
+    Some(passwd_from(unsafe { &*pw }))
+}
+
+fn passwd_from(pw: &libc::passwd) -> Passwd {
+    let s = |p: *const c_char| {
+        if p.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: passwd fields are valid C strings when non-NULL.
+            unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
+        }
+    };
+    Passwd {
+        name: s(pw.pw_name),
+        passwd: s(pw.pw_passwd),
+        uid: pw.pw_uid,
+        gid: pw.pw_gid,
+        gecos: s(pw.pw_gecos),
+        dir: s(pw.pw_dir),
+        shell: s(pw.pw_shell),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// More file operations
+
+pub fn lstat(path: &[u8]) -> Result<Stat, i32> {
+    let p = to_cstring(path);
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: p is a valid C string; st has room for a struct stat.
+    if unsafe { libc::lstat(p.as_ptr(), st.as_mut_ptr()) } < 0 {
+        return Err(fail());
+    }
+    // SAFETY: initialized by the successful call.
+    Ok(conv(unsafe { st.assume_init_ref() }))
+}
+
+fn path_call(path: &[u8], f: impl FnOnce(*const c_char) -> c_int) -> Result<(), i32> {
+    let p = to_cstring(path);
+    ok_or_errno(f(p.as_ptr()))
+}
+
+pub fn mkdir(path: &[u8], mode: libc::mode_t) -> Result<(), i32> {
+    // SAFETY: valid C string.
+    path_call(path, |p| unsafe { libc::mkdir(p, mode) })
+}
+pub fn unlink(path: &[u8]) -> Result<(), i32> {
+    // SAFETY: valid C string.
+    path_call(path, |p| unsafe { libc::unlink(p) })
+}
+pub fn rename(from: &[u8], to: &[u8]) -> Result<(), i32> {
+    let a = to_cstring(from);
+    let b = to_cstring(to);
+    // SAFETY: valid C strings.
+    ok_or_errno(unsafe { libc::rename(a.as_ptr(), b.as_ptr()) })
+}
+
+/// `utime(path, NULL)` (now) or `utime(path, {t, t})`.
+pub fn utime(path: &[u8], t: Option<i64>) -> Result<(), i32> {
+    let buf = t.map(|t| libc::utimbuf { actime: t, modtime: t });
+    // SAFETY: valid C string; the utimbuf is NULL or valid.
+    path_call(path, |p| unsafe { libc::utime(p, buf.as_ref().map_or(std::ptr::null(), |b| b as *const _)) })
+}
+
+pub fn fchown(fd: Fd, uid: libc::uid_t, gid: libc::gid_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::fchown(fd, uid, gid) })
+}
+pub fn fchmod(fd: Fd, mode: libc::mode_t) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::fchmod(fd, mode) })
+}
+pub fn ftruncate(fd: Fd, len: i64) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::ftruncate(fd, len) })
+}
+pub fn fsync(fd: Fd) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::fsync(fd) })
+}
+pub fn lseek_set(fd: Fd, off: i64) -> Result<i64, i32> {
+    // SAFETY: no pointers involved.
+    let r = unsafe { libc::lseek(fd, off, libc::SEEK_SET) };
+    if r < 0 { Err(fail()) } else { Ok(r) }
+}
+
+pub fn umask(m: libc::mode_t) -> libc::mode_t {
+    // SAFETY: no pointers involved.
+    unsafe { libc::umask(m) }
+}
+
+/// `mkstemp(template)`: replaces the trailing XXXXXX in place.
+pub fn mkstemp(template: &mut Vec<u8>) -> Result<Fd, i32> {
+    let mut buf = template.clone();
+    buf.push(0);
+    // SAFETY: buf is a writable NUL-terminated template.
+    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr().cast()) };
+    buf.pop();
+    *template = buf;
+    if fd < 0 { Err(fail()) } else { Ok(fd) }
+}
+
+// ---------------------------------------------------------------------------
+// Processes and signals
+
+pub fn fork() -> Result<i32, i32> {
+    // SAFETY: the program is single-threaded.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 { Err(fail()) } else { Ok(pid) }
+}
+
+/// `execl(path, arg0, args..., NULL)`; returns only on failure.
+pub fn execl(path: &[u8], args: &[&[u8]]) -> i32 {
+    let p = to_cstring(path);
+    let cs: Vec<CString> = args.iter().map(|a| to_cstring(a)).collect();
+    let mut argv: Vec<*const c_char> = cs.iter().map(|c| c.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    // SAFETY: p and argv are valid NULL-terminated arrays of C strings.
+    unsafe { libc::execv(p.as_ptr(), argv.as_ptr()) };
+    fail()
+}
+
+/// `waitpid(pid, &status, 0)`: (returned pid, status).
+pub fn waitpid(pid: i32) -> (i32, c_int) {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+    if r < 0 {
+        fail();
+    }
+    (r, st)
+}
+
+pub type Handler = extern "C" fn(c_int);
+
+pub fn signal_handler(sig: c_int, handler: Handler) {
+    // SAFETY: handler is a valid extern "C" fn(c_int).
+    unsafe { libc::signal(sig, handler as *const () as libc::sighandler_t) };
+}
+pub fn signal_ignore(sig: c_int) {
+    // SAFETY: SIG_IGN is a valid disposition.
+    unsafe { libc::signal(sig, libc::SIG_IGN) };
+}
+pub fn signal_default(sig: c_int) {
+    // SAFETY: SIG_DFL is a valid disposition.
+    unsafe { libc::signal(sig, libc::SIG_DFL) };
+}
+
+/// `_exit(code)`.
+pub fn exit_now(code: i32) -> ! {
+    // SAFETY: _exit never returns.
+    unsafe { libc::_exit(code) }
+}
+
+/// `unlink()` of a prepared path, for signal handlers.
+pub fn unlink_c(path: &CStr) {
+    // SAFETY: path is a valid C string.
+    unsafe { libc::unlink(path.as_ptr()) };
+}
+
+/// `setlocale(LC_ALL, "")`.
+pub fn setlocale_all() {
+    // SAFETY: "" is a valid C string; single-threaded.
+    unsafe { libc::setlocale(libc::LC_ALL, c"".as_ptr()) };
+}
+
+// ---------------------------------------------------------------------------
+// PAM (libpam), as security.c uses it
+
+#[repr(C)]
+struct PamHandle {
+    _p: [u8; 0],
+}
+
+#[repr(C)]
+struct PamMessage {
+    msg_style: c_int,
+    msg: *const c_char,
+}
+
+#[repr(C)]
+struct PamConv {
+    conv: extern "C" fn(c_int, *mut *const PamMessage, *mut *mut libc::c_void, *mut libc::c_void) -> c_int,
+    appdata: *mut libc::c_void,
+}
+
+#[link(name = "pam")]
+unsafe extern "C" {
+    fn pam_start(service: *const c_char, user: *const c_char, conv: *const PamConv, pamh: *mut *mut PamHandle)
+    -> c_int;
+    fn pam_end(pamh: *mut PamHandle, status: c_int) -> c_int;
+    fn pam_set_item(pamh: *mut PamHandle, item_type: c_int, item: *const libc::c_void) -> c_int;
+    fn pam_acct_mgmt(pamh: *mut PamHandle, flags: c_int) -> c_int;
+    fn pam_setcred(pamh: *mut PamHandle, flags: c_int) -> c_int;
+    fn pam_open_session(pamh: *mut PamHandle, flags: c_int) -> c_int;
+    fn pam_close_session(pamh: *mut PamHandle, flags: c_int) -> c_int;
+    fn pam_strerror(pamh: *mut PamHandle, errnum: c_int) -> *const c_char;
+}
+
+pub const PAM_SUCCESS: c_int = 0;
+pub const PAM_SILENT: c_int = 0x8000;
+pub const PAM_ESTABLISH_CRED: c_int = 0x0002;
+pub const PAM_DELETE_CRED: c_int = 0x0004;
+const PAM_TTY: c_int = 3;
+const PAM_ERROR_MSG: c_int = 3;
+const PAM_TEXT_INFO: c_int = 4;
+
+/// Where the conversation function sends PAM's messages (`log_it("CRON",
+/// pid, "pam_message", msg)` in C).
+static PAM_LOG: std::sync::OnceLock<fn(&[u8])> = std::sync::OnceLock::new();
+
+pub fn set_pam_log(f: fn(&[u8])) {
+    let _ = PAM_LOG.set(f);
+}
+
+/// `cron_conv()`: log error and info messages; answer nothing.
+extern "C" fn cron_conv(
+    num_msg: c_int,
+    msgm: *mut *const PamMessage,
+    _resp: *mut *mut libc::c_void,
+    _appdata: *mut libc::c_void,
+) -> c_int {
+    for i in 0..num_msg.max(0) as usize {
+        // SAFETY: PAM passes num_msg valid message pointers.
+        let m = unsafe { &**msgm.add(i) };
+        if (m.msg_style == PAM_ERROR_MSG || m.msg_style == PAM_TEXT_INFO) && !m.msg.is_null() {
+            // SAFETY: msg is a valid C string.
+            let text = unsafe { CStr::from_ptr(m.msg) }.to_bytes();
+            if let Some(f) = PAM_LOG.get() {
+                f(text);
+            }
+        }
+    }
+    0
+}
+
+static CONV: PamConv = PamConv { conv: cron_conv, appdata: std::ptr::null_mut() };
+// SAFETY: CONV is immutable and only read by libpam.
+unsafe impl Sync for PamConv {}
+
+/// An open PAM transaction (`pamh`).
+#[derive(Debug)]
+pub struct Pam {
+    h: *mut PamHandle,
+}
+
+impl Pam {
+    /// `pam_start(service, user, &conv, &pamh)`.
+    pub fn start(service: &[u8], user: &[u8]) -> Result<Pam, (Option<Pam>, c_int)> {
+        let s = to_cstring(service);
+        let u = to_cstring(user);
+        let mut h: *mut PamHandle = std::ptr::null_mut();
+        // SAFETY: valid strings and conversation; h receives the handle.
+        let r = unsafe { pam_start(s.as_ptr(), u.as_ptr(), &CONV, &mut h) };
+        let pam = if h.is_null() { None } else { Some(Pam { h }) };
+        if r != PAM_SUCCESS {
+            return Err((pam, r));
+        }
+        Ok(pam.expect("pam_start succeeded"))
+    }
+
+    pub fn set_tty(&self, tty: &CStr) -> c_int {
+        // SAFETY: valid handle; PAM copies the string.
+        unsafe { pam_set_item(self.h, PAM_TTY, tty.as_ptr().cast()) }
+    }
+
+    pub fn acct_mgmt(&self, flags: c_int) -> c_int {
+        // SAFETY: valid handle.
+        unsafe { pam_acct_mgmt(self.h, flags) }
+    }
+
+    pub fn setcred(&self, flags: c_int) -> c_int {
+        // SAFETY: valid handle.
+        unsafe { pam_setcred(self.h, flags) }
+    }
+
+    pub fn open_session(&self, flags: c_int) -> c_int {
+        // SAFETY: valid handle.
+        unsafe { pam_open_session(self.h, flags) }
+    }
+
+    pub fn close_session(&self, flags: c_int) -> c_int {
+        // SAFETY: valid handle.
+        unsafe { pam_close_session(self.h, flags) }
+    }
+
+    /// `pam_strerror(pamh, err)`.
+    pub fn strerror(&self, err: c_int) -> Vec<u8> {
+        // SAFETY: valid handle; the result is a static C string.
+        let p = unsafe { pam_strerror(self.h, err) };
+        if p.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: as above.
+        unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
+    }
+
+    /// `pam_end(pamh, status)`.
+    pub fn end(self, status: c_int) {
+        // SAFETY: valid handle, ended once (self is consumed).
+        unsafe { pam_end(self.h, status) };
+    }
+}
