@@ -1,0 +1,33 @@
+[package]
+name = "cronie-rs"
+version = "0.1.0"
+edition = "2024"
+# Each ported file keeps its upstream license; see README.md.
+license = "ISC AND BSD-3-Clause AND GPL-2.0-or-later"
+repository = "https://codeberg.org/scottfk/cronie-rs"
+description = "Drop-in Rust port of cronie (crond, crontab, cronnext, anacron)"
+rust-version = "1.88"
+
+[lib]
+name = "cronie"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cronnext"
+path = "src/bin/cronnext.rs"
+
+[dependencies]
+libc = "0.2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
