@@ -4,6 +4,7 @@
  * 20261111 - Created by Claude (claude.ai, Anthropic) - scottfk
  * 20261111 - Copied from metalog-rs for the cronie-rs tests; $TEST_FAKETIME - Claude - scottfk
  * 20261111 - Virtual sleep() for crond ($TEST_VIRTUAL_SLEEP, $TEST_STOP) - Claude - scottfk
+ * 20261111 - Virtual alarm() for anacron - Claude - scottfk
  *
  * If $TEST_FAKETIME names a readable file holding "SECONDS NANOSECONDS",
  * time(), gettimeofday() and clock_gettime(CLOCK_REALTIME) return that
@@ -18,7 +19,9 @@
  * fake clock forward by the requested seconds.  So crond runs a day of
  * minutes in moments, and each minute's jobs are done before the next one
  * starts.  If that would reach $TEST_STOP (seconds), the clock stops there
- * and the process gets SIGTERM, for a clean shutdown.
+ * and the process gets SIGTERM, for a clean shutdown.  alarm(n) works the
+ * same way, then raises SIGALRM at once (anacron waits with alarm() and
+ * sigsuspend()).
  *
  * Build: cc -shared -fPIC -O2 -o faketime.so faketime.c -ldl
  */
@@ -139,27 +142,58 @@ static int children_done(void)
     return 1;
 }
 
+static void advance(unsigned int secs, int *stopping);
+
+unsigned int alarm(unsigned int secs)
+{
+    static unsigned int (*real)(unsigned int);
+    int stopping = 0;
+
+    if (!getenv("TEST_FAKETIME") || !getenv("TEST_VIRTUAL_SLEEP")) {
+        if (!real)
+            real = (unsigned int (*)(unsigned int)) dlsym(RTLD_NEXT, "alarm");
+        return real(secs);
+    }
+    if (secs == 0)
+        return 0;
+    advance(secs, &stopping);
+    kill(getpid(), stopping ? SIGTERM : SIGALRM);
+    return 0;
+}
+
 unsigned int sleep(unsigned int secs)
 {
     static unsigned int (*real)(unsigned int);
+    int stopping = 0;
+
+    if (!getenv("TEST_FAKETIME") || !getenv("TEST_VIRTUAL_SLEEP")) {
+        if (!real)
+            real = (unsigned int (*)(unsigned int)) dlsym(RTLD_NEXT, "sleep");
+        return real(secs);
+    }
+    advance(secs, &stopping);
+    if (stopping)
+        kill(getpid(), SIGTERM);
+    return 0;
+}
+
+/* Wait for our children, then move the fake clock on by secs (stopping at
+ * $TEST_STOP, if set). */
+static void advance(unsigned int secs, int *stopping)
+{
     const char *f = getenv("TEST_FAKETIME");
     const char *stop = getenv("TEST_STOP");
     struct timespec ts, nap = { 0, 2000000 };
     char buf[64], tmp[4096];
     int fd, saved = errno, n;
 
-    if (!f || !getenv("TEST_VIRTUAL_SLEEP")) {
-        if (!real)
-            real = (unsigned int (*)(unsigned int)) dlsym(RTLD_NEXT, "sleep");
-        return real(secs);
-    }
     while (!children_done())
         nanosleep(&nap, NULL);
     if (!fake(&ts))
-        return 0;
+        return;
     ts.tv_sec += secs;
-    int stopping = stop && ts.tv_sec >= atoll(stop);
-    if (stopping)
+    *stopping = stop && ts.tv_sec >= atoll(stop);
+    if (*stopping)
         ts.tv_sec = atoll(stop);
     n = snprintf(buf, sizeof buf, "%lld %ld\n", (long long) ts.tv_sec, (long) ts.tv_nsec);
     snprintf(tmp, sizeof tmp, "%s.tmp", f);
@@ -169,7 +203,4 @@ unsigned int sleep(unsigned int secs)
         rename(tmp, f);
     }
     errno = saved;
-    if (stopping)
-        kill(getpid(), SIGTERM);
-    return 0;
 }

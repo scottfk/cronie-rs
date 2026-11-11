@@ -17,8 +17,8 @@
 
 ## Status
 
-Phases 1 to 3 are done: the crontab parser, the database loader,
-`cronnext`, `crontab` and `crond`. anacron is next.
+Phases 1 to 4 are done: all four programs (`crond`, `crontab`, `cronnext`
+and `anacron`). Packaging is next.
 The reference is upstream's tag `cronie-1.7.2`, built as Gentoo builds it
 ([tools/build-reference.sh](tools/build-reference.sh)):
 
@@ -46,6 +46,7 @@ same object files into each of them), and a binary per program in
 | `src/bin/cronnext.rs` | `cronnext.c` |
 | `src/bin/crontab.rs` | `crontab.c` |
 | `src/bin/crond.rs` | `cron.c`, `job.c`, `do_command.c`, `popen.c` and the inotify half of `database.c` |
+| `src/bin/anacron.rs` | `anacron/`: main, readtab, lock, runjob, log, gregor and matchrx |
 | `src/stdio.rs`, `getopt.rs`, `num.rs`, `bytes.rs` | glibc behavior the output depends on, copied from metalog-rs/openrc-rs |
 | `tests/` | differential tests and the harness ([tests/common/mod.rs](tests/common/mod.rs)) |
 
@@ -86,6 +87,8 @@ the syslog messages and every file left behind.
     are compared as sets.
   - Clock jumps and SIGHUP come from jobs, which rewrite the fake clock or run
     `kill -HUP 1`.
+- anacron runs the same way. Its waits are `alarm()` plus `sigsuspend()`, so
+  the shim's `alarm()` also advances the clock and raises SIGALRM at once.
 
 To see what each case produced:
 `CRONIE_DIFF_SHOW=1 cargo test -- --nocapture`.
@@ -102,7 +105,7 @@ To see what each case produced:
    clock jumps, running jobs (`do_command.c`, PAM, mail), and `@reboot`.
    Tested in the sandbox, real users and PAM included; the VM is for a real
    boot later.
-4. **`anacron`:** anacrontab, timestamps, delays and serialized runs.
+4. **`anacron` (done, branch `phase4-anacron`):** anacrontab, timestamps, delays and serialized runs.
 5. **Packaging:** a Gentoo ebuild (`sys-process/cronie` drop-in), rehearsed
    in the VM.
 

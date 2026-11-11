@@ -104,6 +104,9 @@ pub struct Case {
     /// virtual time (the shim's sleep() advances the clock), until this
     /// time, when the shim sends SIGTERM.
     pub stop: Option<i64>,
+    /// PID 1 of a new PID namespace with virtual time (set by `run_for`
+    /// and `virtual_pid1`).
+    pub virtual_time: bool,
 }
 
 impl Case {
@@ -119,12 +122,20 @@ impl Case {
             user: As::Root,
             setgid: None,
             stop: None,
+            virtual_time: false,
         }
+    }
+
+    /// Virtual time as PID 1, without a stop time (anacron exits by itself).
+    pub fn virtual_pid1(mut self) -> Case {
+        self.virtual_time = true;
+        self
     }
 
     /// Run as a daemon in virtual time for `minutes` minutes (see `stop`).
     pub fn run_for(mut self, minutes: i64) -> Case {
         self.stop = Some(self.time.0 + minutes * 60);
+        self.virtual_time = true;
         self
     }
 
@@ -199,6 +210,7 @@ pub fn rust_binary(program: &str) -> PathBuf {
     PathBuf::from(match program {
         "cronnext" => env!("CARGO_BIN_EXE_cronnext"),
         "crond" => env!("CARGO_BIN_EXE_crond"),
+        "anacron" => env!("CARGO_BIN_EXE_anacron"),
         "crontab" => env!("CARGO_BIN_EXE_crontab"),
         p => panic!("no Rust binary for {p} yet"),
     })
@@ -445,6 +457,9 @@ fn binds(t: &Path) -> Vec<(CString, CString)> {
         (path_c(&t.join("tmp")), cstr("/tmp")),
         (path_c(&t.join("run")), cstr("/run")),
     ];
+    if Path::new("/var/spool/anacron").exists() {
+        b.push((path_c(&t.join("anacron")), cstr("/var/spool/anacron")));
+    }
     if Path::new("/usr/sbin/sendmail").exists() {
         b.push((path_c(&t.join("sendmail")), cstr("/usr/sbin/sendmail")));
     }
@@ -484,7 +499,7 @@ fn clean(t: &Path) {
     if !t.exists() || std::fs::remove_dir_all(t).is_ok() {
         return;
     }
-    for d in ["etc", ".realetc", "spool", "tmp", "run"] {
+    for d in ["etc", ".realetc", "spool", "tmp", "run", "anacron"] {
         std::fs::create_dir_all(t.join(d)).ok();
     }
     root_shell(t, &format!("chown -R 0:0 '{0}' 2>/dev/null; chmod -R u+rwX '{0}' 2>/dev/null; exit 0", t.display()));
@@ -593,7 +608,8 @@ fn snapshot(t: &Path, pid: u32) -> BTreeMap<String, String> {
 fn build_etc(t: &Path) {
     let etc = t.join("etc");
     std::fs::create_dir_all(&etc).unwrap();
-    let own = ["passwd", "group", "pam.d", "crontab", "cron.d", "cron.allow", "cron.deny", "shadow", "gshadow"];
+    let own =
+        ["passwd", "group", "pam.d", "crontab", "cron.d", "cron.allow", "cron.deny", "shadow", "gshadow", "anacrontab"];
     for ent in std::fs::read_dir("/etc").unwrap().flatten() {
         let name = ent.file_name();
         if own.contains(&name.to_str().unwrap_or("")) {
@@ -624,7 +640,19 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     use std::os::fd::AsRawFd;
     let t = manifest_dir().join("target/difftest").join(&case.name).join(label);
     clean(&t);
-    for d in ["spool/crontabs", ".realetc", "tmp", "home/root", "home/alice", "home/bob", "bin", "run", "mail", "out"] {
+    for d in [
+        "spool/crontabs",
+        ".realetc",
+        "tmp",
+        "home/root",
+        "home/alice",
+        "home/bob",
+        "bin",
+        "run",
+        "mail",
+        "out",
+        "anacron",
+    ] {
         std::fs::create_dir_all(t.join(d)).unwrap();
     }
     build_etc(&t);
@@ -705,8 +733,10 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
         cstr(format!("LD_PRELOAD={}", shim().display())),
         cstr(format!("TEST_FAKETIME={}", t.join(".faketime").display())),
     ];
-    if let Some(stop) = case.stop {
+    if case.virtual_time {
         envp.push(cstr("TEST_VIRTUAL_SLEEP=1"));
+    }
+    if let Some(stop) = case.stop {
         envp.push(cstr(format!("TEST_STOP={stop}")));
     }
     for (k, v) in &case.env {
@@ -716,7 +746,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     argv.extend(case.args.iter().map(|a| cstr(subst(a, &t))));
 
     let pid = spawn_in_sandbox(Spawn {
-        pid_ns: case.stop.is_some(),
+        pid_ns: case.virtual_time,
         binds: binds(&t),
         chowns,
         user: case.user,
@@ -748,7 +778,7 @@ pub fn run(case: &Case, bin: &Path, label: &str) -> Outcome {
     }
     let rd = |n: &str| normalize(&String::from_utf8_lossy(&std::fs::read(t.join(n)).unwrap()), &t, pid);
     let mut files = snapshot(&t, pid);
-    if case.stop.is_some() {
+    if case.virtual_time {
         // Jobs of the same minute run concurrently: compare their mails
         // and log lines as sets, and job pids as placeholders.
         let mails: Vec<String> = files.keys().filter(|k| k.starts_with("./mail/")).cloned().collect();

@@ -33,6 +33,17 @@ means it's cosmetic or hard to hit.
 | low | The `@reboot` lock file is created with mode `S_IRUSR & S_IWUSR` (`&`, not `\|`), which is 0. It only needs to exist, so nothing breaks. | `bin/crond.rs` (`run_reboot_jobs`) |
 | low | Carriage returns are dropped from mailed job output, except a `\r` that is the very first byte. | `bin/crond.rs` (`child_process`) |
 
+## anacron
+
+| Severity | Quirk | Where |
+|---|---|---|
+| medium | `START_HOURS_RANGE` and `PREFERRED_HOUR` are only checked for jobs that already have an 8-byte timestamp file. A job's first run, or a run after its timestamp is lost, ignores them and runs at any hour. | `bin/anacron.rs` (`consider_job`) |
+| medium | The anacrontab's environment assignments are applied with `setenv()` in anacron's own process and never undone. So a job also sees assignments that were applied for jobs that started before it, including ones written *after* it in the anacrontab (jobs run in order of delay, not of lines). | `bin/anacron.rs` (`setup_env`) |
+| low | A `RANDOM_DELAY` larger than RAND_MAX/2 divides by zero, and anacron dies of SIGFPE while reading the anacrontab. | `bin/anacron.rs` (`unbiased_rand`) |
+| low | A job with an unknown named period (`@fortnightly`) is reported as "skipping", but is registered anyway. C leaves its period type uninitialized; cronie-rs makes it 0, so the job is due on every run. | `bin/anacron.rs` (`register_period_job`) |
+| low | Checking `@monthly`/`@weekly`-style jobs prints a leftover debugging line, `Checking against N with M`, to stdout. | `bin/anacron.rs` (`consider_job`) |
+| low | Messages of exactly 150 characters are marked " (truncated)", although they fit. | `bin/anacron.rs` (`make_msg`) |
+
 ## Intentional differences
 
 These are the only places where cronie-rs knowingly behaves differently. Each

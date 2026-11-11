@@ -1064,3 +1064,182 @@ pub fn capitalize_program_name() -> Vec<u8> {
         bytes[start..].to_vec()
     }
 }
+
+// ---------------------------------------------------------------------------
+// anacron: POSIX regex, fnmatch, alarm/sigsuspend, fcntl locks
+
+/// `match_rx()` failed (C's -1): a bad regex or an unmatched group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegexError;
+
+/// `match_rx(rx, string, n_sub, ...)` from matchrx.c: extended regex match;
+/// `Err` on a regex error or an unmatched subexpression, else the
+/// substrings (C NUL-terminates them in place; they never touch).
+pub fn match_rx(rx: &CStr, string: &[u8], n_sub: usize) -> Result<Option<Vec<Vec<u8>>>, RegexError> {
+    let s = to_cstring(string);
+    // SAFETY: regex_t is plain old data until regcomp initializes it.
+    let mut crx: libc::regex_t = unsafe { std::mem::zeroed() };
+    // SAFETY: valid pattern; crx is writable.
+    if unsafe { libc::regcomp(&mut crx, rx.as_ptr(), libc::REG_EXTENDED) } != 0 {
+        return Err(RegexError);
+    }
+    let mut subs = vec![libc::regmatch_t { rm_so: 0, rm_eo: 0 }; n_sub + 1];
+    // SAFETY: crx is compiled; subs has n_sub + 1 entries.
+    let r = unsafe { libc::regexec(&crx, s.as_ptr(), n_sub + 1, subs.as_mut_ptr(), 0) };
+    if r != 0 && r != libc::REG_NOMATCH {
+        // (C leaks crx here.)
+        return Err(RegexError);
+    }
+    // SAFETY: crx was compiled above and is freed once.
+    unsafe { libc::regfree(&mut crx) };
+    if r == libc::REG_NOMATCH {
+        return Ok(None);
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    for m in &subs[1..] {
+        if m.rm_so == -1 {
+            return Err(RegexError);
+        }
+        out.push(bytes[m.rm_so as usize..m.rm_eo as usize].to_vec());
+    }
+    Ok(Some(out))
+}
+
+/// `fnmatch(pattern, string, 0)`: 0 on a match, FNM_NOMATCH, or an error.
+pub fn fnmatch(pattern: &[u8], string: &[u8]) -> c_int {
+    let p = to_cstring(pattern);
+    let s = to_cstring(string);
+    // SAFETY: valid C strings.
+    unsafe { libc::fnmatch(p.as_ptr(), s.as_ptr(), 0) }
+}
+
+pub const FNM_NOMATCH: c_int = libc::FNM_NOMATCH;
+
+/// `alarm(n)`, through libc (the test clock shim intercepts it).
+pub fn alarm(n: u32) {
+    // SAFETY: no pointers involved.
+    unsafe { libc::alarm(n) };
+}
+
+/// The current signal mask (`sigprocmask(0, NULL, &ss)`).
+pub fn sigmask_current() -> Result<libc::sigset_t, i32> {
+    // SAFETY: sigset_t is plain old data; the call fills it.
+    unsafe {
+        let mut ss: libc::sigset_t = std::mem::zeroed();
+        ok_or_errno(libc::sigprocmask(0, std::ptr::null(), &mut ss))?;
+        Ok(ss)
+    }
+}
+
+/// `sigprocmask(SIG_SETMASK, ss, NULL)`.
+pub fn sigmask_set(ss: &libc::sigset_t) -> Result<(), i32> {
+    // SAFETY: ss is a valid sigset_t.
+    ok_or_errno(unsafe { libc::sigprocmask(libc::SIG_SETMASK, ss, std::ptr::null_mut()) })
+}
+
+/// A set of these signals.
+pub fn sigset_of(sigs: &[c_int]) -> libc::sigset_t {
+    // SAFETY: sigset_t is plain old data; sigemptyset/sigaddset fill it.
+    unsafe {
+        let mut ss: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut ss);
+        for &s in sigs {
+            libc::sigaddset(&mut ss, s);
+        }
+        ss
+    }
+}
+
+/// `sigprocmask(SIG_BLOCK, ss, NULL)`.
+pub fn sigmask_block(ss: &libc::sigset_t) -> Result<(), i32> {
+    // SAFETY: ss is a valid sigset_t.
+    ok_or_errno(unsafe { libc::sigprocmask(libc::SIG_BLOCK, ss, std::ptr::null_mut()) })
+}
+
+/// `sigsuspend(mask without sigs)`: wait for one of `sigs`.
+pub fn sigsuspend_unblocking(sigs: &[c_int]) -> Result<(), i32> {
+    let mut ss = sigmask_current()?;
+    // SAFETY: ss is a valid sigset_t.
+    unsafe {
+        for &s in sigs {
+            libc::sigdelset(&mut ss, s);
+        }
+        libc::sigsuspend(&ss);
+    }
+    Ok(())
+}
+
+/// `sigaction(sig, {handler, mask, flags})`.
+pub fn sigaction_masked(sig: c_int, handler: Handler, mask: &libc::sigset_t, flags: c_int) -> Result<(), i32> {
+    // SAFETY: sigaction is plain old data; handler is a valid fn.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handler as *const () as libc::sighandler_t;
+        sa.sa_mask = *mask;
+        sa.sa_flags = flags;
+        ok_or_errno(libc::sigaction(sig, &sa, std::ptr::null_mut()))
+    }
+}
+
+/// `fcntl(fd, F_SETLK, {F_WRLCK, whole file})`.
+pub fn lock_whole_file(fd: Fd) -> Result<(), i32> {
+    // SAFETY: flock is plain old data.
+    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+    fl.l_type = libc::F_WRLCK as i16;
+    fl.l_whence = libc::SEEK_SET as i16;
+    // SAFETY: fl is a valid struct flock.
+    ok_or_errno(unsafe { libc::fcntl(fd, libc::F_SETLK, &fl) })
+}
+
+pub fn fchdir(fd: Fd) -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    ok_or_errno(unsafe { libc::fchdir(fd) })
+}
+
+/// `sscanf(s, "%4d%2d%2d", &y, &m, &d) == 3`.
+pub fn scan_ymd(s: &[u8]) -> Option<(i32, i32, i32)> {
+    let c = to_cstring(s);
+    let (mut y, mut m, mut d) = (0 as c_int, 0 as c_int, 0 as c_int);
+    // SAFETY: valid string and format; three int out-pointers.
+    let n = unsafe { libc::sscanf(c.as_ptr(), c"%4d%2d%2d".as_ptr(), &mut y, &mut m, &mut d) };
+    (n == 3).then_some((y, m, d))
+}
+
+/// `gethostname(buf, 512)`.
+pub fn gethostname_512() -> Option<Vec<u8>> {
+    let mut buf = [0u8; 512];
+    // SAFETY: buf is valid for its length.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    Some(c_str_prefix(&buf).to_vec())
+}
+
+/// Raise SIGFPE, as an integer division by zero does in C.
+pub fn raise_sigfpe() -> ! {
+    // SAFETY: restoring the default action and raising have no
+    // memory-safety implications; the process ends here.
+    unsafe {
+        libc::signal(libc::SIGFPE, libc::SIG_DFL);
+        libc::raise(libc::SIGFPE);
+        libc::abort()
+    }
+}
+
+/// `waitpid(pid, &status, WNOHANG)`: (returned pid, status).
+pub fn waitpid_pid_nohang(pid: i32) -> (i32, c_int) {
+    let mut st: c_int = 0;
+    // SAFETY: st is a valid out-pointer.
+    let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+    if r < 0 {
+        fail();
+    }
+    (r, st)
+}
+
+/// `setsid()`, reporting failure.
+pub fn setsid_checked() -> Result<(), i32> {
+    // SAFETY: no pointers involved.
+    if unsafe { libc::setsid() } == -1 { Err(fail()) } else { Ok(()) }
+}
