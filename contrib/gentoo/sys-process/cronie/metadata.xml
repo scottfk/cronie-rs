@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>scottfk@gmail.com</email>
+	</maintainer>
+	<longdescription>
+		cronie 1.7.2 with crond, crontab, cronnext and anacron replaced by
+		cronie-rs, a strict-compatibility Rust port; the configuration, init
+		script and PAM file are upstream's and Gentoo's, as in
+		sys-process/cronie.
+	</longdescription>
+	<use>
+		<flag name="anacron">Install the periodic anacron command scheduler.</flag>
+	</use>
+	<upstream>
+		<remote-id type="codeberg">scottfk/cronie-rs</remote-id>
+		<remote-id type="github">cronie-crond/cronie</remote-id>
+	</upstream>
+</pkgmetadata>
