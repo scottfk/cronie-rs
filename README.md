@@ -116,7 +116,7 @@ To see what each case produced:
    [tools/vm-cron-check.sh](tools/vm-cron-check.sh).
 
 The testing approach comes from
-[metalog-rs](https://codeberg.org/scottfk/metalog-rs): the C reference and
+[metalog-rs](https://github.com/scottfk/metalog-rs): the C reference and
 the port run side by side on the same input, in unprivileged user
 namespaces, with an LD_PRELOAD clock, and the harness compares everything
 they do.
