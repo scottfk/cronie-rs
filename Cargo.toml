@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 # Each ported file keeps its upstream license; see README.md.
 license = "ISC AND BSD-3-Clause AND GPL-2.0-or-later"
-repository = "https://codeberg.org/scottfk/cronie-rs"
+repository = "https://github.com/scottfk/cronie-rs"
 description = "Drop-in Rust port of cronie (crond, crontab, cronnext, anacron)"
 rust-version = "1.88"
 

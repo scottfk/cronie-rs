@@ -1,6 +1,7 @@
 # Copyright 1999-2026 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 # 20261111 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261115 - Fetch from GitHub; the repo moved off Codeberg - Claude - scottfk
 
 # cronie 1.7.2 with its programs (crond, crontab, cronnext, anacron) from
 # cronie-rs (a strict-compatibility Rust port, built live from git).
@@ -24,8 +25,8 @@ CRON_SYSTEM_CRONTAB="yes"
 inherit cargo cron flag-o-matic git-r3 pam systemd
 
 DESCRIPTION="Cronie is a standard UNIX daemon cron based on the original vixie-cron (cronie-rs programs)"
-HOMEPAGE="https://codeberg.org/scottfk/cronie-rs https://github.com/cronie-crond/cronie"
-EGIT_REPO_URI="https://codeberg.org/scottfk/cronie-rs.git"
+HOMEPAGE="https://github.com/scottfk/cronie-rs https://github.com/cronie-crond/cronie"
+EGIT_REPO_URI="https://github.com/scottfk/cronie-rs.git"
 SRC_URI="
 	https://github.com/cronie-crond/cronie/releases/download/cronie-${CRONIE_PV}/cronie-${CRONIE_PV}.tar.gz
 	${CARGO_CRATE_URIS}

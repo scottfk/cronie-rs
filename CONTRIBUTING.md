@@ -61,7 +61,7 @@ clean.**
 ### Differential tests
 
 Most testing is done by running the C reference and cronie-rs side by side on the same
-input, the way [metalog-rs](https://codeberg.org/scottfk/metalog-rs) does it:
+input, the way [metalog-rs](https://github.com/scottfk/metalog-rs) does it:
 
 - Each run is in a private user and mount namespace with real users mapped from your
   subordinate ids, and its own directory under `target/difftest/<case>/{c,rust}/`.
@@ -97,7 +97,7 @@ what shows the behavior matches.
 
 ## How to submit changes
 
-The repo lives at <https://codeberg.org/scottfk/cronie-rs>.
+The repo lives at <https://github.com/scottfk/cronie-rs>.
 
 1. Fork the repo and create a branch.
 2. Make your change, with tests.
